@@ -6,6 +6,10 @@
 // its rx_data/rx_valid outputs are already in the right clock domain -
 // they wire straight into sync_fifo, no crossing needed.
 //
+// FIFO is 8x64 (was 8x16), and its .full output feeds back into
+// i2c_slave as fifo_full, so a data byte is only ACKed when there's
+// actually room for it - see i2c_slave.v for the NACK-on-full logic.
+//
 //   clk_in  : 50 MHz -> DE10-Lite pin MAX10_CLK1_50 (PIN_P11)
 //   rst_in_n: active-low reset -> DE10-Lite KEY0 (PIN_B8)
 //   sda     : open-drain inout -> GPIO pin, needs an EXTERNAL 4.7k
@@ -40,30 +44,32 @@ module i2c_uart_bridge #(
     wire [7:0] rx_data;
     wire       rx_valid;
     wire       sda_o;
+    wire       fifo_full;   // declared here so it can feed i2c_slave below;
+                             // driven by sync_fifo's .full further down
 
     i2c_slave #(.OWN_ADDR(I2C_ADDR)) u_i2c_slave (
-        .clk_50m  (clk_50m),
-        .rst_n    (rst_n),
-        .scl      (scl),
-        .sda      (sda),
-        .rx_data  (rx_data),
-        .rx_valid (rx_valid),
-        .sda_o    (sda_o)
+        .clk_50m   (clk_50m),
+        .rst_n     (rst_n),
+        .scl       (scl),
+        .sda       (sda),
+        .fifo_full (fifo_full),
+        .rx_data   (rx_data),
+        .rx_valid  (rx_valid),
+        .sda_o     (sda_o)
     );
 
     // open-drain SDA: pull low when driving (ACK), release (Hi-Z) otherwise
     assign sda = sda_o ? 1'b0 : 1'bz;
 
-    // ---------------- Synchronous FIFO ----------------
+    // ---------------- Synchronous FIFO: 8 x 64 ----------------
     wire [7:0] fifo_dout;
     wire       fifo_empty;
-    wire       fifo_full;
     wire       fifo_rd_en;
 
     sync_fifo #(
         .DATA_WIDTH (8),
-        .DEPTH      (16),
-        .ADDR_WIDTH (4)
+        .DEPTH      (64),
+        .ADDR_WIDTH (6)
     ) u_fifo (
         .clk_50m (clk_50m),
         .rst_n   (rst_n),
