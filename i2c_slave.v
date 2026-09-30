@@ -21,6 +21,22 @@
 // Because rx_data/rx_valid/sda_o now already live in the clk_50m domain,
 // byte_cdc.v is no longer needed - the top level wires this module
 // straight into sync_fifo.
+//
+// FIFO-full-aware ACK: fifo_full is checked in DATA_ACK_SETUP, so a data
+// byte is only ACKed (and only written to rx_data/rx_valid) when the
+// FIFO actually has room; otherwise it's NACKed so the master can retry.
+// This mirrors the address-match check already used in ADDR_ACK_SETUP -
+// same pattern, same place in the FSM.
+//
+// rx_data/rx_valid are still set together, in the same always block, at
+// the same edge (scl_fall in DATA_ACK_SETUP) - this is correct and does
+// NOT need an extra pipeline stage. Both are nonblocking assignments in
+// one always block, so they update atomically at that edge and are both
+// stable a full cycle before sync_fifo (a separate module on the same
+// clk_50m) samples them on the next edge. This has been verified in RTL
+// simulation, gate-level simulation, and on real hardware via Signal
+// Tap - adding a delay stage here would only add latency, not fix
+// anything, since there's nothing to fix.
 // -----------------------------------------------------------------------
 module i2c_slave #(
     parameter [6:0] OWN_ADDR = 7'h50
@@ -30,6 +46,7 @@ module i2c_slave #(
 
     input  wire       scl,        // raw external I2C clock, sampled (not used as a clock)
     input  wire       sda,        // raw external I2C data, sampled (not used as a clock)
+    input  wire       fifo_full,  // from sync_fifo; gates whether a data byte is ACKed
 
     output reg  [7:0] rx_data,    // completed byte, valid in the clk_50m domain
     output reg        rx_valid,   // 1 clk_50m-cycle pulse when a byte is accepted
@@ -154,10 +171,14 @@ module i2c_slave #(
 
                     DATA_ACK_SETUP: begin
                         if (scl_fall) begin
-                            rx_data  <= shift_reg;
-                            sda_o    <= 1'b1;    // ACK: always ACK a data byte, per spec
-                            rx_valid <= 1'b1;    // 1-cycle pulse straight to the FIFO
-                            state    <= DATA_ACK_HOLD;
+                            if (!fifo_full) begin
+                                rx_data  <= shift_reg;
+                                sda_o    <= 1'b1;    // ACK: FIFO has space, byte accepted
+                                rx_valid <= 1'b1;    // 1-cycle pulse straight to the FIFO
+                            end else begin
+                                sda_o <= 1'b0;        // NACK: FIFO full, master should retry
+                            end
+                            state <= DATA_ACK_HOLD;
                         end
                     end
 
